@@ -1,0 +1,25 @@
+{
+  "name": "social-media-backend-microservice",
+  "version": "2.0.0",
+  "private": true,
+  "workspaces": [
+    "shared",
+    "services/*"
+  ],
+  "scripts": {
+    "dev": "docker-compose up --build",
+    "dev:db": "docker-compose up postgres redis -d",
+    "down": "docker-compose down",
+    "down:clean": "docker-compose down -v",
+    "logs": "docker-compose logs -f",
+    "prisma:generate": "npx prisma generate --schema=prisma/schema.prisma",
+    "prisma:migrate": "npx prisma migrate dev --schema=prisma/schema.prisma",
+    "prisma:migrate:prod": "npx prisma migrate deploy --schema=prisma/schema.prisma",
+    "prisma:studio": "npx prisma studio --schema=prisma/schema.prisma",
+    "prisma:seed": "node prisma/seed.js"
+  },
+  "dependencies": {
+    "prisma": "^5.20.0",
+    "@prisma/client": "^5.20.0"
+  }
+}

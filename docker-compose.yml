@@ -1,0 +1,338 @@
+version: '3.8'
+
+x-common-env: &common-env
+  NODE_ENV: development
+  DATABASE_URL: postgresql://${POSTGRES_USER:-tribel}:${POSTGRES_PASSWORD:-tribel_secret}@postgres:5432/${POSTGRES_DB:-tribel_db}?schema=public
+  REDIS_URL: redis://redis:6379
+  JWT_SECRET: ${JWT_SECRET}
+  JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+  JWT_ACCESS_EXPIRY: ${JWT_ACCESS_EXPIRY:-15m}
+  JWT_REFRESH_EXPIRY: ${JWT_REFRESH_EXPIRY:-30d}
+  AWS_REGION: ${AWS_REGION:-ap-southeast-1}
+  S3_BUCKET: ${S3_BUCKET}
+
+x-common-depends: &common-depends
+  postgres:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+
+services:
+  # ── Infrastructure ──────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - '5432:5432'
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tribel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tribel_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-tribel_db}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-tribel}']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  # ── API Gateway ─────────────────────────────────
+  api-gateway:
+    build: ./services/api-gateway
+    ports:
+      - '3000:3000'
+    environment:
+      <<: *common-env
+      PORT: 3000
+      AUTH_SERVICE_URL: http://auth-service:3001
+      USER_SERVICE_URL: http://user-service:3002
+      POST_SERVICE_URL: http://post-service:3003
+      SOCIAL_SERVICE_URL: http://social-service:3004
+      FEED_SERVICE_URL: http://feed-service:3005
+      COMMENT_SERVICE_URL: http://comment-service:3006
+      ENGAGEMENT_SERVICE_URL: http://engagement-service:3007
+      STORY_SERVICE_URL: http://story-service:3008
+      ARTICLE_SERVICE_URL: http://article-service:3009
+      GROUP_SERVICE_URL: http://group-service:3010
+      MESSAGE_SERVICE_URL: http://message-service:3011
+      NOTIFICATION_SERVICE_URL: http://notification-service:3012
+      MEDIA_SERVICE_URL: http://media-service:3013
+      ANALYTICS_SERVICE_URL: http://analytics-service:3014
+      AD_SERVICE_URL: http://ad-service:3015
+      MODERATION_SERVICE_URL: http://moderation-service:3016
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── Auth Service ────────────────────────────────
+  auth-service:
+    build:
+      context: .
+      dockerfile: services/auth-service/Dockerfile
+    ports:
+      - '3001:3001'
+    environment:
+      <<: *common-env
+      PORT: 3001
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL:-http://localhost:3000/api/auth/google/callback}
+      APPLE_CLIENT_ID: ${APPLE_CLIENT_ID}
+      APPLE_TEAM_ID: ${APPLE_TEAM_ID}
+      APPLE_KEY_ID: ${APPLE_KEY_ID}
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── User Service ────────────────────────────────
+  user-service:
+    build:
+      context: .
+      dockerfile: services/user-service/Dockerfile
+    ports:
+      - '3002:3002'
+    environment:
+      <<: *common-env
+      PORT: 3002
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── Post Service ────────────────────────────────
+  post-service:
+    build:
+      context: .
+      dockerfile: services/post-service/Dockerfile
+    ports:
+      - '3003:3003'
+    environment:
+      <<: *common-env
+      PORT: 3003
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── Social Service ──────────────────────────────
+  social-service:
+    build:
+      context: .
+      dockerfile: services/social-service/Dockerfile
+    ports:
+      - '3004:3004'
+    environment:
+      <<: *common-env
+      PORT: 3004
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── Feed Service ────────────────────────────────
+  feed-service:
+    build:
+      context: .
+      dockerfile: services/feed-service/Dockerfile
+    ports:
+      - '3005:3005'
+    environment:
+      <<: *common-env
+      PORT: 3005
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── Comment Service ─────────────────────────────
+  comment-service:
+    build:
+      context: .
+      dockerfile: services/comment-service/Dockerfile
+    ports:
+      - '3006:3006'
+    environment:
+      <<: *common-env
+      PORT: 3006
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── Engagement Service ──────────────────────────
+  engagement-service:
+    build:
+      context: .
+      dockerfile: services/engagement-service/Dockerfile
+    ports:
+      - '3007:3007'
+    environment:
+      <<: *common-env
+      PORT: 3007
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── Story Service ───────────────────────────────
+  story-service:
+    build:
+      context: .
+      dockerfile: services/story-service/Dockerfile
+    ports:
+      - '3008:3008'
+    environment:
+      <<: *common-env
+      PORT: 3008
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── Article Service ─────────────────────────────
+  article-service:
+    build:
+      context: .
+      dockerfile: services/article-service/Dockerfile
+    ports:
+      - '3009:3009'
+    environment:
+      <<: *common-env
+      PORT: 3009
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── Group Service ───────────────────────────────
+  group-service:
+    build:
+      context: .
+      dockerfile: services/group-service/Dockerfile
+    ports:
+      - '3010:3010'
+    environment:
+      <<: *common-env
+      PORT: 3010
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── Message Service ─────────────────────────────
+  message-service:
+    build:
+      context: .
+      dockerfile: services/message-service/Dockerfile
+    ports:
+      - '3011:3011'
+    environment:
+      <<: *common-env
+      PORT: 3011
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── Notification Service ────────────────────────
+  notification-service:
+    build:
+      context: .
+      dockerfile: services/notification-service/Dockerfile
+    ports:
+      - '3012:3012'
+    environment:
+      <<: *common-env
+      PORT: 3012
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID}
+      FIREBASE_PRIVATE_KEY: ${FIREBASE_PRIVATE_KEY}
+      FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL}
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── Media Service ───────────────────────────────
+  media-service:
+    build:
+      context: .
+      dockerfile: services/media-service/Dockerfile
+    ports:
+      - '3013:3013'
+    environment:
+      <<: *common-env
+      PORT: 3013
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── Analytics Service ───────────────────────────
+  analytics-service:
+    build:
+      context: .
+      dockerfile: services/analytics-service/Dockerfile
+    ports:
+      - '3014:3014'
+    environment:
+      <<: *common-env
+      PORT: 3014
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── Ad Service ──────────────────────────────────
+  ad-service:
+    build:
+      context: .
+      dockerfile: services/ad-service/Dockerfile
+    ports:
+      - '3015:3015'
+    environment:
+      <<: *common-env
+      PORT: 3015
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+  # ── Moderation Service ──────────────────────────
+  moderation-service:
+    build:
+      context: .
+      dockerfile: services/moderation-service/Dockerfile
+    ports:
+      - '3016:3016'
+    environment:
+      <<: *common-env
+      PORT: 3016
+    depends_on:
+      <<: *common-depends
+    networks:
+      - backend
+
+volumes:
+  pgdata:
+  redisdata:
+
+networks:
+  backend:
+    driver: bridge
