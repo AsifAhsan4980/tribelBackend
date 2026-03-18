@@ -197,6 +197,10 @@ model User {
   role                    UserRole       @default(User)
   isLikerUser             Boolean        @default(false)
   isInfluencer            Boolean        @default(false)
+  isMasterAccount         Boolean        @default(false)
+  totalCommentLikes       Int            @default(0)
+  pushNotification        Boolean        @default(true)
+  isMuteSound             Boolean        @default(false)
   signupDate              DateTime?
   lastActiveAt            DateTime?
 
@@ -556,16 +560,24 @@ model Post {
   totalComments Int        @default(0)
   totalShares   Int        @default(0)
   totalViews    Int        @default(0)
-  isTrending    Boolean    @default(false)
-  isBreaking    Boolean    @default(false)
-  isAdminPost   Boolean    @default(false)
-  isBoosted     Boolean    @default(false)
-  isDeleted     Boolean    @default(false)
-  isReported    Boolean    @default(false)
-  postDate      DateTime   @default(now())
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
-  deletedAt     DateTime?
+  isTrending         Boolean    @default(false)
+  isBreaking         Boolean    @default(false)
+  isAdminPost        Boolean    @default(false)
+  isBoosted          Boolean    @default(false)
+  isDeleted          Boolean    @default(false)
+  isReported         Boolean    @default(false)
+  isBlocked          Boolean    @default(false)
+  isWallPost         Boolean    @default(false)
+  isGroupPost        Boolean    @default(false)
+  isSharePost        Boolean    @default(false)
+  isVideoPost        Boolean    @default(false)
+  videoUploadStatus  Int        @default(0)           // 0=pending, 1=complete
+  sharePostMetaId    String?                           // ID of original shared post
+  wallPostUserId     String?                           // If wall post, the wall owner
+  postDate           DateTime   @default(now())
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+  deletedAt          DateTime?
 
   user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   group    UserGroup?    @relation(fields: [groupId], references: [id], onDelete: SetNull)
@@ -868,12 +880,41 @@ model StoryComment {
   userId     String
   content    String
   totalLikes Int      @default(0)
+  totalReplies Int    @default(0)
   isDeleted  Boolean  @default(false)
   createdAt  DateTime @default(now())
 
-  story Story @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  story   Story              @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  replies StoryCommentReply[]
+  likes   StoryCommentLike[]
 
   @@map("story_comments")
+}
+
+model StoryCommentReply {
+  id        String   @id @default(uuid())
+  commentId String
+  storyId   String
+  userId    String
+  content   String
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  comment StoryComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@map("story_comment_replies")
+}
+
+model StoryCommentLike {
+  id        String   @id @default(uuid())
+  commentId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  comment StoryComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@unique([commentId, userId])
+  @@map("story_comment_likes")
 }
 
 // ─────────────────────────────────────────────────
@@ -921,6 +962,7 @@ model ArticleComment {
   article Article              @relation(fields: [articleId], references: [id], onDelete: Cascade)
   user    User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   replies ArticleCommentReply[]
+  likes   ArticleCommentLike[]
 
   @@map("article_comments")
 }
@@ -950,6 +992,18 @@ model ArticleLike {
 
   @@unique([articleId, userId])
   @@map("article_likes")
+}
+
+model ArticleCommentLike {
+  id        String   @id @default(uuid())
+  commentId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  comment ArticleComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@unique([commentId, userId])
+  @@map("article_comment_likes")
 }
 
 // ─────────────────────────────────────────────────

@@ -1,16 +1,16 @@
 const router = require('express').Router();
 const { authenticate } = require('shared');
-const commentController = require('../controllers/comment.controller');
+const ctrl = require('../controllers/comment.controller');
 
-// Comment routes
-router.post('/', authenticate, commentController.createComment);
-router.get('/post/:postId', authenticate, commentController.getCommentsByPost);
-router.put('/:commentId', authenticate, commentController.updateComment);
-router.delete('/:commentId', authenticate, commentController.deleteComment);
+// ─── Post Comments ─────────────────────────────────────
+router.post('/', authenticate, ctrl.createComment);
+router.get('/post/:postId', authenticate, ctrl.getCommentsByPost);
+router.put('/:commentId', authenticate, ctrl.updateComment);
+router.delete('/:commentId', authenticate, ctrl.deleteComment);
 
-// Reply routes
-router.post('/:commentId/replies', authenticate, commentController.createReply);
-router.get('/:commentId/replies', authenticate, commentController.getRepliesByComment);
-router.delete('/replies/:replyId', authenticate, commentController.deleteReply);
+// ─── Replies ───────────────────────────────────────────
+router.post('/:commentId/replies', authenticate, ctrl.createReply);
+router.get('/:commentId/replies', authenticate, ctrl.getRepliesByComment);
+router.delete('/replies/:replyId', authenticate, ctrl.deleteReply);
 
 module.exports = router;

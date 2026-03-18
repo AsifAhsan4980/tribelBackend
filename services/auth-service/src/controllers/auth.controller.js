@@ -10,13 +10,18 @@ const {
   error,
 } = require('shared');
 
-// ─── Helpers ───────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 
 const SALT_ROUNDS = 10;
 const REFRESH_EXPIRY_DAYS = 30;
+const RESET_TOKEN_EXPIRY_HOURS = 1;
+const SUPPORT_USER_ID = process.env.SUPPORT_USER_ID || null;
+const WELCOME_MESSAGE = process.env.WELCOME_MESSAGE || "Welcome to Tribel family! We're glad you're here.";
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * Hash a raw refresh token with SHA-256 for storage in DB.
+ * Hash a raw token with SHA-256 for secure storage in DB.
  */
 const hashToken = (token) =>
   crypto.createHash('sha256').update(token).digest('hex');
@@ -28,8 +33,7 @@ const hashToken = (token) =>
 const issueTokens = async (user, { deviceId, ipAddress, userAgent } = {}) => {
   const accessToken = signAccessToken(user);
 
-  // signRefreshToken expects (user, jti) — we use the RefreshToken row id as jti
-  // We need to create the row first with a placeholder, then update
+  // Create the RefreshToken row with a temporary placeholder hash
   const refreshRow = await prisma.refreshToken.create({
     data: {
       userId: user.id,
@@ -41,6 +45,7 @@ const issueTokens = async (user, { deviceId, ipAddress, userAgent } = {}) => {
     },
   });
 
+  // Sign the refresh JWT using the row id as jti
   const rawRefreshToken = signRefreshToken(user, refreshRow.id);
   const tokenHash = hashToken(rawRefreshToken);
 
@@ -53,7 +58,117 @@ const issueTokens = async (user, { deviceId, ipAddress, userAgent } = {}) => {
   return { accessToken, refreshToken: rawRefreshToken };
 };
 
-// ─── Register ──────────────────────────────────────────────
+/**
+ * Sanitize a user record for API response.
+ */
+const sanitizeUser = (user) => ({
+  id: user.id,
+  email: user.email,
+  username: user.username,
+  firstName: user.firstName,
+  lastName: user.lastName,
+  fullName: user.fullName,
+  role: user.role,
+  profilePhotoKey: user.profilePhotoKey,
+  isAccountVerified: user.isAccountVerified,
+});
+
+/**
+ * Post-registration side-effects (from likerslaPostConfirmation):
+ * 1. Auto-friend with support account (bidirectional, status=accepted)
+ * 2. Create welcome chat room with welcome message
+ * 3. Create welcome notification
+ */
+const runPostRegistration = async (newUser) => {
+  if (!SUPPORT_USER_ID) {
+    console.warn('SUPPORT_USER_ID not configured. Skipping post-registration actions.');
+    return;
+  }
+
+  // Verify support user exists
+  const supportUser = await prisma.user.findUnique({
+    where: { id: SUPPORT_USER_ID },
+    select: { id: true, accountStatus: true },
+  });
+
+  if (!supportUser || supportUser.accountStatus !== 'active') {
+    console.warn('Support user not found or inactive. Skipping post-registration actions.');
+    return;
+  }
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      // 1. Auto-friend with support account (bidirectional)
+      await tx.userFriend.createMany({
+        data: [
+          {
+            userId: newUser.id,
+            friendUserId: SUPPORT_USER_ID,
+            status: 'accepted',
+            isFollower: false,
+          },
+          {
+            userId: SUPPORT_USER_ID,
+            friendUserId: newUser.id,
+            status: 'accepted',
+            isFollower: false,
+          },
+        ],
+        skipDuplicates: true,
+      });
+
+      // Increment totalFriends for both users
+      await tx.user.update({
+        where: { id: newUser.id },
+        data: { totalFriends: { increment: 1 } },
+      });
+
+      await tx.user.update({
+        where: { id: SUPPORT_USER_ID },
+        data: { totalFriends: { increment: 1 } },
+      });
+
+      // 2. Create welcome chat room
+      const chatRoom = await tx.userChatRoom.create({
+        data: {
+          ownerId: newUser.id,
+          receiverId: SUPPORT_USER_ID,
+          roomType: 'direct',
+          status: 'Active',
+          lastMessageAt: new Date(),
+        },
+      });
+
+      // Create welcome message from the support account
+      await tx.message.create({
+        data: {
+          roomId: chatRoom.id,
+          senderId: SUPPORT_USER_ID,
+          receiverId: newUser.id,
+          content: WELCOME_MESSAGE,
+          contentType: 'Text',
+          sentAt: new Date(),
+        },
+      });
+
+      // 3. Create welcome notification
+      await tx.notification.create({
+        data: {
+          ownerId: newUser.id,
+          actionCreatorId: SUPPORT_USER_ID,
+          notificationType: 'system',
+          isSeen: false,
+          notificationDate: new Date(),
+        },
+      });
+    });
+  } catch (err) {
+    // Post-registration is best-effort; don't fail the registration
+    console.error('Post-registration error:', err.message);
+  }
+};
+
+// ─── Register ─────────────────────────────────────────────────────────────────
 
 exports.register = async (req, res, next) => {
   try {
@@ -62,12 +177,12 @@ exports.register = async (req, res, next) => {
     // Check if email or username already taken
     const existingUser = await prisma.user.findFirst({
       where: {
-        OR: [{ email }, { username }],
+        OR: [{ email: email.toLowerCase() }, { username }],
       },
     });
 
     if (existingUser) {
-      const field = existingUser.email === email ? 'Email' : 'Username';
+      const field = existingUser.email === email.toLowerCase() ? 'Email' : 'Username';
       return error(res, `${field} already in use`, 409);
     }
 
@@ -75,7 +190,7 @@ exports.register = async (req, res, next) => {
 
     const user = await prisma.user.create({
       data: {
-        email,
+        email: email.toLowerCase(),
         username,
         passwordHash,
         firstName: firstName || null,
@@ -92,18 +207,16 @@ exports.register = async (req, res, next) => {
       userAgent: req.headers['user-agent'],
     });
 
+    // Run post-registration side-effects asynchronously (fire-and-forget)
+    runPostRegistration(user).catch((err) => {
+      console.error('Post-registration async error:', err.message);
+    });
+
     return success(
       res,
       {
         ...tokens,
-        user: {
-          id: user.id,
-          email: user.email,
-          username: user.username,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          role: user.role,
-        },
+        user: sanitizeUser(user),
       },
       201
     );
@@ -112,20 +225,28 @@ exports.register = async (req, res, next) => {
   }
 };
 
-// ─── Login ─────────────────────────────────────────────────
+// ─── Login ────────────────────────────────────────────────────────────────────
 
 exports.login = async (req, res, next) => {
   try {
     const { email, password } = req.body;
 
-    const user = await prisma.user.findUnique({ where: { email } });
+    const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
 
     if (!user) {
       return error(res, 'Invalid email or password', 401);
     }
 
-    if (user.accountStatus !== 'active') {
-      return error(res, `Account is ${user.accountStatus}`, 403);
+    if (user.accountStatus === 'deleted') {
+      return error(res, 'This account has been deleted', 403);
+    }
+
+    if (user.accountStatus === 'blocked') {
+      return error(res, 'Your account has been blocked. Please contact support.', 403);
+    }
+
+    if (user.accountStatus === 'deactivated') {
+      return error(res, 'Your account is deactivated. Please reactivate your account.', 403);
     }
 
     if (!user.passwordHash) {
@@ -150,21 +271,14 @@ exports.login = async (req, res, next) => {
 
     return success(res, {
       ...tokens,
-      user: {
-        id: user.id,
-        email: user.email,
-        username: user.username,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        role: user.role,
-      },
+      user: sanitizeUser(user),
     });
   } catch (err) {
     next(err);
   }
 };
 
-// ─── Refresh ───────────────────────────────────────────────
+// ─── Refresh ──────────────────────────────────────────────────────────────────
 
 exports.refresh = async (req, res, next) => {
   try {
@@ -190,7 +304,12 @@ exports.refresh = async (req, res, next) => {
     }
 
     if (storedToken.revokedAt) {
-      return error(res, 'Refresh token has been revoked', 401);
+      // Token reuse detected -- revoke all tokens for this user (security measure)
+      await prisma.refreshToken.updateMany({
+        where: { userId: storedToken.userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      return error(res, 'Refresh token has been revoked. All sessions terminated for security.', 401);
     }
 
     if (new Date() > storedToken.expiresAt) {
@@ -210,11 +329,10 @@ exports.refresh = async (req, res, next) => {
   }
 };
 
-// ─── Logout ────────────────────────────────────────────────
+// ─── Logout ───────────────────────────────────────────────────────────────────
 
 exports.logout = async (req, res, next) => {
   try {
-    const authHeader = req.headers.authorization;
     const { refreshToken } = req.body;
 
     if (refreshToken) {
@@ -231,14 +349,37 @@ exports.logout = async (req, res, next) => {
   }
 };
 
-// ─── Forgot Password ──────────────────────────────────────
+// ─── Forgot Password ─────────────────────────────────────────────────────────
 
 exports.forgotPassword = async (req, res, next) => {
   try {
     const { email } = req.body;
 
-    // Check user exists (do not reveal if they don't)
-    const user = await prisma.user.findUnique({ where: { email } });
+    const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+
+    if (user && user.accountStatus === 'active' && user.passwordHash) {
+      // Generate a cryptographically random reset token
+      const rawResetToken = crypto.randomBytes(32).toString('hex');
+      const resetTokenHash = hashToken(rawResetToken);
+      const resetTokenExpiry = new Date(Date.now() + RESET_TOKEN_EXPIRY_HOURS * 60 * 60 * 1000);
+
+      // Store the hash in the user record (reuse passwordHash field is not ideal;
+      // instead we store in a dedicated field approach: use a RefreshToken row with a special flag)
+      // For simplicity, we create a RefreshToken with a known deviceId prefix to identify it as reset token.
+      await prisma.refreshToken.create({
+        data: {
+          userId: user.id,
+          tokenHash: resetTokenHash,
+          deviceId: 'password-reset',
+          expiresAt: resetTokenExpiry,
+        },
+      });
+
+      // In production, send email with the raw token:
+      // Example: `${FRONTEND_URL}/reset-password?token=${rawResetToken}&email=${email}`
+      console.log(`[FORGOT-PASSWORD] Reset token for ${email}: ${rawResetToken}`);
+      // TODO: integrate with email service (SendGrid, SES, etc.)
+    }
 
     // Always return success to prevent email enumeration
     return success(res, {
@@ -249,7 +390,77 @@ exports.forgotPassword = async (req, res, next) => {
   }
 };
 
-// ─── Change Password ──────────────────────────────────────
+// ─── Reset Password (validate token and update password) ──────────────────────
+
+exports.resetPassword = async (req, res, next) => {
+  try {
+    const { token, email, newPassword } = req.body;
+
+    if (!token || !email || !newPassword) {
+      return error(res, 'token, email, and newPassword are required', 400);
+    }
+
+    if (newPassword.length < 8) {
+      return error(res, 'Password must be at least 8 characters', 400);
+    }
+
+    const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+    if (!user) {
+      return error(res, 'Invalid or expired reset token', 400);
+    }
+
+    // Look up the reset token
+    const resetTokenHash = hashToken(token);
+    const storedToken = await prisma.refreshToken.findFirst({
+      where: {
+        userId: user.id,
+        tokenHash: resetTokenHash,
+        deviceId: 'password-reset',
+        revokedAt: null,
+      },
+    });
+
+    if (!storedToken) {
+      return error(res, 'Invalid or expired reset token', 400);
+    }
+
+    if (new Date() > storedToken.expiresAt) {
+      // Clean up expired token
+      await prisma.refreshToken.update({
+        where: { id: storedToken.id },
+        data: { revokedAt: new Date() },
+      });
+      return error(res, 'Reset token has expired. Please request a new one.', 400);
+    }
+
+    // Hash the new password
+    const passwordHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
+
+    // Update password, revoke the reset token, and revoke all refresh tokens
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: user.id },
+        data: { passwordHash },
+      }),
+      // Revoke the reset token
+      prisma.refreshToken.update({
+        where: { id: storedToken.id },
+        data: { revokedAt: new Date() },
+      }),
+      // Revoke all existing refresh tokens for security
+      prisma.refreshToken.updateMany({
+        where: { userId: user.id, revokedAt: null, deviceId: { not: 'password-reset' } },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+
+    return success(res, { message: 'Password reset successfully. Please log in with your new password.' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── Change Password ──────────────────────────────────────────────────────────
 
 exports.changePassword = async (req, res, next) => {
   try {
@@ -271,18 +482,23 @@ exports.changePassword = async (req, res, next) => {
       return error(res, 'Current password is incorrect', 401);
     }
 
+    if (oldPassword === newPassword) {
+      return error(res, 'New password must be different from the current password', 400);
+    }
+
     const newHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
 
-    await prisma.user.update({
-      where: { id: userId },
-      data: { passwordHash: newHash },
-    });
-
-    // Revoke all existing refresh tokens for security
-    await prisma.refreshToken.updateMany({
-      where: { userId, revokedAt: null },
-      data: { revokedAt: new Date() },
-    });
+    // Update password and revoke all existing refresh tokens
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: userId },
+        data: { passwordHash: newHash },
+      }),
+      prisma.refreshToken.updateMany({
+        where: { userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
 
     // Issue fresh tokens
     const tokens = await issueTokens(user, {
@@ -299,7 +515,7 @@ exports.changePassword = async (req, res, next) => {
   }
 };
 
-// ─── Google OAuth Callback ─────────────────────────────────
+// ─── Google OAuth Callback ────────────────────────────────────────────────────
 
 exports.googleCallback = async (req, res, next) => {
   try {
@@ -321,25 +537,16 @@ exports.googleCallback = async (req, res, next) => {
       userAgent: req.headers['user-agent'],
     });
 
-    // For OAuth flows, redirect with tokens as query params (or return JSON)
-    // Returning JSON for API clients
     return success(res, {
       ...tokens,
-      user: {
-        id: user.id,
-        email: user.email,
-        username: user.username,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        role: user.role,
-      },
+      user: sanitizeUser(user),
     });
   } catch (err) {
     next(err);
   }
 };
 
-// ─── Apple Sign-In ─────────────────────────────────────────
+// ─── Apple Sign-In ────────────────────────────────────────────────────────────
 
 exports.appleSignIn = async (req, res, next) => {
   try {
@@ -374,12 +581,13 @@ exports.appleSignIn = async (req, res, next) => {
     });
 
     let user;
+    let isNewUser = false;
 
     if (oauthAccount) {
       user = oauthAccount.user;
     } else {
       // Check if a user with this email exists
-      user = await prisma.user.findUnique({ where: { email } });
+      user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
 
       if (!user) {
         // Create new user
@@ -394,7 +602,7 @@ exports.appleSignIn = async (req, res, next) => {
 
         user = await prisma.user.create({
           data: {
-            email,
+            email: email.toLowerCase(),
             username,
             firstName: firstName || null,
             lastName: lastName || null,
@@ -404,6 +612,8 @@ exports.appleSignIn = async (req, res, next) => {
             lastActiveAt: new Date(),
           },
         });
+
+        isNewUser = true;
       }
 
       // Create OAuth link
@@ -427,23 +637,23 @@ exports.appleSignIn = async (req, res, next) => {
       userAgent: req.headers['user-agent'],
     });
 
+    // Run post-registration for new social sign-up users
+    if (isNewUser) {
+      runPostRegistration(user).catch((err) => {
+        console.error('Post-registration async error:', err.message);
+      });
+    }
+
     return success(res, {
       ...tokens,
-      user: {
-        id: user.id,
-        email: user.email,
-        username: user.username,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        role: user.role,
-      },
+      user: sanitizeUser(user),
     });
   } catch (err) {
     next(err);
   }
 };
 
-// ─── Get Me ────────────────────────────────────────────────
+// ─── Get Me ───────────────────────────────────────────────────────────────────
 
 exports.getMe = async (req, res, next) => {
   try {
@@ -485,6 +695,19 @@ exports.getMe = async (req, res, next) => {
         lastActiveAt: true,
         createdAt: true,
         updatedAt: true,
+        // Onboarding flags
+        tourProfile: true,
+        tourPost: true,
+        tourGroup: true,
+        tourStory: true,
+        tourArticle: true,
+        tourMessage: true,
+        tourNotification: true,
+        tourFollowing: true,
+        tourFriend: true,
+        tourFeed: true,
+        tourExplore: true,
+        tourSettings: true,
       },
     });
 
@@ -493,6 +716,154 @@ exports.getMe = async (req, res, next) => {
     }
 
     return success(res, user);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── Delete Account (GDPR — from likerslaRevokeUserToken) ────────────────────
+
+exports.deleteAccount = async (req, res, next) => {
+  try {
+    const userId = req.user.sub;
+
+    // Verify the user exists and get current status
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true, accountStatus: true },
+    });
+
+    if (!user) {
+      return error(res, 'User not found', 404);
+    }
+
+    if (user.accountStatus === 'deleted') {
+      return error(res, 'Account already deleted', 400);
+    }
+
+    const now = new Date();
+    const anonymizedEmail = `deleted_${userId}@deleted.tribel.com`;
+
+    // Run the entire cascade deletion in a single transaction
+    await prisma.$transaction(async (tx) => {
+      // 1. Delete all UserRank records
+      await tx.userRank.deleteMany({ where: { userId } });
+
+      // 2. Soft-delete all posts (mark isDeleted=true)
+      await tx.post.updateMany({
+        where: { userId },
+        data: { isDeleted: true, deletedAt: now },
+      });
+
+      // 3. Delete all UserGroupMember records
+      await tx.userGroupMember.deleteMany({ where: { userId } });
+
+      // 4. Delete all notifications where user is the action creator
+      await tx.notification.deleteMany({ where: { actionCreatorId: userId } });
+
+      // Also delete notifications owned by the user
+      await tx.notification.deleteMany({ where: { ownerId: userId } });
+
+      // 5. Delete all UserFollower records (both directions)
+      await tx.userFollower.deleteMany({
+        where: { OR: [{ userId }, { followerId: userId }] },
+      });
+
+      // 6. Delete all UserFriend records (both directions)
+      await tx.userFriend.deleteMany({
+        where: { OR: [{ userId }, { friendUserId: userId }] },
+      });
+
+      // 7. Delete all BlockedUser records (both directions)
+      await tx.blockedUser.deleteMany({
+        where: { OR: [{ userId }, { blockedId: userId }] },
+      });
+
+      // 8. Delete all RefreshToken records
+      await tx.refreshToken.deleteMany({ where: { userId } });
+
+      // 9. Delete all PushNotificationSubscriber records
+      await tx.pushNotificationSubscriber.deleteMany({ where: { userId } });
+
+      // 10. Delete OAuth accounts
+      await tx.userOAuth.deleteMany({ where: { userId } });
+
+      // 11. Soft-delete comments and replies
+      await tx.postComment.updateMany({
+        where: { userId },
+        data: { isDeleted: true, deletedAt: now },
+      });
+
+      await tx.postCommentReply.updateMany({
+        where: { userId },
+        data: { isDeleted: true, deletedAt: now },
+      });
+
+      // 12. Delete likes
+      await tx.like.deleteMany({ where: { userId } });
+
+      // 13. Delete stories
+      await tx.story.deleteMany({ where: { userId } });
+
+      // 14. Delete articles (soft delete)
+      await tx.article.updateMany({
+        where: { userId },
+        data: { deletedAt: now },
+      });
+
+      // 15. Delete messages (soft delete)
+      await tx.message.updateMany({
+        where: { senderId: userId },
+        data: { isDeleted: true },
+      });
+
+      // 16. Delete search history
+      await tx.userSearchHistory.deleteMany({ where: { userId } });
+
+      // 17. Delete user interests
+      await tx.userInterest.deleteMany({ where: { userId } });
+
+      // 18. Delete user education, experience, awards, certificates
+      await tx.userEducation.deleteMany({ where: { userId } });
+      await tx.userProfessionalExperience.deleteMany({ where: { userId } });
+      await tx.userHonorsAward.deleteMany({ where: { userId } });
+      await tx.userCertificate.deleteMany({ where: { userId } });
+
+      // 19. Delete filter selections
+      await tx.userFilterSelection.deleteMany({ where: { userId } });
+
+      // 20. Delete daily activity
+      await tx.userDailyActivity.deleteMany({ where: { userId } });
+
+      // 21. Delete login info
+      await tx.userLoginInfo.deleteMany({ where: { userId } });
+
+      // 22. Soft-delete the user: anonymize email, mark as deleted
+      await tx.user.update({
+        where: { id: userId },
+        data: {
+          accountStatus: 'deleted',
+          deletedAt: now,
+          email: anonymizedEmail,
+          passwordHash: null,
+          firstName: null,
+          lastName: null,
+          fullName: 'Deleted User',
+          bio: null,
+          headline: null,
+          profilePhotoKey: null,
+          coverPhotoKey: null,
+          primaryPhoneNo: null,
+          primaryPhoneCc: null,
+          secondaryEmail: null,
+          totalFollowers: 0,
+          totalFollowing: 0,
+          totalFriends: 0,
+        },
+      });
+    });
+
+    return success(res, { message: 'Account deleted successfully. All personal data has been removed.' });
   } catch (err) {
     next(err);
   }

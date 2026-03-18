@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 3007;
 app.use(helmet());
 app.use(cors());
 app.use(morgan('dev'));
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'engagement-service' }));
 app.use('/api/engagement', engagementRoutes);

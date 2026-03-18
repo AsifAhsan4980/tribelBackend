@@ -14,7 +14,7 @@ app.use(cors());
 app.use(morgan('dev'));
 app.use(express.json());
 
-app.get('/health', (req, res) => res.json({ status: 'ok', service: 'analytics-service' }));
+app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'analytics-service' }));
 
 app.use('/api/analytics', analyticsRoutes);
 

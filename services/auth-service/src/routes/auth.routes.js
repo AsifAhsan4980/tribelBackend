@@ -7,10 +7,12 @@ const {
   refresh,
   logout,
   forgotPassword,
+  resetPassword,
   changePassword,
   googleCallback,
   appleSignIn,
   getMe,
+  deleteAccount,
 } = require('../controllers/auth.controller');
 const {
   registerSchema,
@@ -18,15 +20,19 @@ const {
   changePasswordSchema,
   refreshSchema,
   forgotPasswordSchema,
+  resetPasswordSchema,
   appleTokenSchema,
 } = require('../utils/validation');
 
-// Local auth
+// Public auth routes (no authentication required)
 router.post('/register', validate(registerSchema), register);
 router.post('/login', validate(loginSchema), login);
 router.post('/refresh', validate(refreshSchema), refresh);
-router.post('/logout', authenticate, logout);
 router.post('/forgot-password', validate(forgotPasswordSchema), forgotPassword);
+router.post('/reset-password', validate(resetPasswordSchema), resetPassword);
+
+// Authenticated auth routes
+router.post('/logout', authenticate, logout);
 router.post('/change-password', authenticate, validate(changePasswordSchema), changePassword);
 
 // Google OAuth
@@ -45,5 +51,8 @@ router.post('/apple', validate(appleTokenSchema), appleSignIn);
 
 // Current user
 router.get('/me', authenticate, getMe);
+
+// Account deletion (GDPR)
+router.delete('/account', authenticate, deleteAccount);
 
 module.exports = router;

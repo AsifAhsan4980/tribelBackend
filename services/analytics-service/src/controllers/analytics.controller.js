@@ -1,9 +1,30 @@
 const { prisma, success, error } = require('shared');
 
-// GET /api/analytics/daily — get DailyHistory records, date range query params
+// ─────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────
+
+/** Returns { start, end } Date objects for the start/end of a given date. */
+const dayBounds = (date) => {
+  const d = new Date(date);
+  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+  const end = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+  return { start, end };
+};
+
+/** Returns a Date at midnight today. */
+const todayDate = () => {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+};
+
+// ─────────────────────────────────────────────────
+// GET /api/analytics/daily — DailyHistory records (Admin)
+// ─────────────────────────────────────────────────
+
 const getDailyHistory = async (req, res, next) => {
   try {
-    const { from, to } = req.query;
+    const { from, to, limit = 30 } = req.query;
 
     const where = {};
     if (from || to) {
@@ -15,6 +36,7 @@ const getDailyHistory = async (req, res, next) => {
     const records = await prisma.dailyHistory.findMany({
       where,
       orderBy: { date: 'desc' },
+      take: Math.min(Number(limit), 365),
     });
 
     return success(res, records);
@@ -23,10 +45,13 @@ const getDailyHistory = async (req, res, next) => {
   }
 };
 
-// GET /api/analytics/monthly — get MonthlyHistory records
+// ─────────────────────────────────────────────────
+// GET /api/analytics/monthly — MonthlyHistory records (Admin)
+// ─────────────────────────────────────────────────
+
 const getMonthlyHistory = async (req, res, next) => {
   try {
-    const { year } = req.query;
+    const { year, limit = 24 } = req.query;
 
     const where = {};
     if (year) where.year = Number(year);
@@ -34,6 +59,7 @@ const getMonthlyHistory = async (req, res, next) => {
     const records = await prisma.monthlyHistory.findMany({
       where,
       orderBy: [{ year: 'desc' }, { month: 'desc' }],
+      take: Math.min(Number(limit), 120),
     });
 
     return success(res, records);
@@ -42,75 +68,95 @@ const getMonthlyHistory = async (req, res, next) => {
   }
 };
 
-// GET /api/analytics/active-users — count distinct users active today
+// ─────────────────────────────────────────────────
+// GET /api/analytics/active-users — today's DAU (Admin)
+// ─────────────────────────────────────────────────
+
 const getActiveUsers = async (req, res, next) => {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
+    const today = todayDate();
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
     const activeUsers = await prisma.userLoginInfo.findMany({
       where: {
-        createdAt: {
-          gte: today,
-          lt: tomorrow,
-        },
+        createdAt: { gte: today, lt: tomorrow },
       },
       select: { userId: true },
       distinct: ['userId'],
     });
 
+    // Also get total registered users for context
+    const totalRegistered = await prisma.user.count({
+      where: { accountStatus: 'active', deletedAt: null },
+    });
+
     return success(res, {
       date: today.toISOString().split('T')[0],
       activeUserCount: activeUsers.length,
+      totalRegisteredUsers: totalRegistered,
+      dauPercent: totalRegistered > 0
+        ? Number(((activeUsers.length / totalRegistered) * 100).toFixed(2))
+        : 0,
     });
   } catch (err) {
     next(err);
   }
 };
 
-// GET /api/analytics/retention — get retention data (example data)
+// ─────────────────────────────────────────────────
+// GET /api/analytics/retention — 7-day cohort retention (Admin)
+// ─────────────────────────────────────────────────
+
 const getRetention = async (req, res, next) => {
   try {
-    // Return retention data structure with example calculation
-    // In production, this would be computed from UserDailyActivity and UserLoginInfo
-    const today = new Date();
+    const { days = 7 } = req.query;
+    const periodDays = Math.min(Number(days), 30);
+    const today = todayDate();
     const retentionData = [];
 
-    for (let i = 6; i >= 0; i--) {
+    for (let i = periodDays - 1; i >= 0; i--) {
       const date = new Date(today);
       date.setDate(date.getDate() - i);
-      const dateStr = date.toISOString().split('T')[0];
-
-      const startOfDay = new Date(date);
-      startOfDay.setHours(0, 0, 0, 0);
-      const endOfDay = new Date(date);
-      endOfDay.setHours(23, 59, 59, 999);
+      const { start, end } = dayBounds(date);
 
       const dailyActiveCount = await prisma.userLoginInfo.findMany({
         where: {
-          createdAt: { gte: startOfDay, lte: endOfDay },
+          createdAt: { gte: start, lte: end },
         },
         select: { userId: true },
         distinct: ['userId'],
       });
 
+      // Count new signups on that day
+      const newSignups = await prisma.user.count({
+        where: {
+          signupDate: { gte: start, lte: end },
+        },
+      });
+
       retentionData.push({
-        date: dateStr,
+        date: start.toISOString().split('T')[0],
         activeUsers: dailyActiveCount.length,
+        newSignups,
       });
     }
 
-    // Calculate total users for retention rate
     const totalUsers = await prisma.user.count({
       where: { accountStatus: 'active', deletedAt: null },
     });
 
+    // Calculate average DAU over the period
+    const totalActive = retentionData.reduce((sum, d) => sum + d.activeUsers, 0);
+    const avgDau = periodDays > 0 ? Math.round(totalActive / periodDays) : 0;
+
     return success(res, {
       totalUsers,
-      period: '7d',
+      period: `${periodDays}d`,
+      avgDailyActiveUsers: avgDau,
+      retentionRate: totalUsers > 0
+        ? Number(((avgDau / totalUsers) * 100).toFixed(2))
+        : 0,
       data: retentionData,
     });
   } catch (err) {
@@ -118,12 +164,16 @@ const getRetention = async (req, res, next) => {
   }
 };
 
+// ─────────────────────────────────────────────────
 // POST /api/analytics/login — record login event
+// ─────────────────────────────────────────────────
+
 const recordLogin = async (req, res, next) => {
   try {
     const userId = req.user.sub;
-    const { ipAddress, deviceId, deviceType, platform, appVersion } = req.body;
+    const { deviceId, deviceType, platform, appVersion, ipAddress } = req.body;
 
+    // Create login record
     const loginInfo = await prisma.userLoginInfo.create({
       data: {
         userId,
@@ -136,7 +186,23 @@ const recordLogin = async (req, res, next) => {
       },
     });
 
-    // Update user's lastActiveAt
+    // Upsert daily activity — increment loginCount
+    const today = todayDate();
+    await prisma.userDailyActivity.upsert({
+      where: { userId_date: { userId, date: today } },
+      update: { loginCount: { increment: 1 } },
+      create: {
+        userId,
+        date: today,
+        loginCount: 1,
+        postCount: 0,
+        likeCount: 0,
+        commentCount: 0,
+        shareCount: 0,
+      },
+    });
+
+    // Update user lastActiveAt
     await prisma.user.update({
       where: { id: userId },
       data: { lastActiveAt: new Date() },
@@ -148,36 +214,149 @@ const recordLogin = async (req, res, next) => {
   }
 };
 
-// POST /api/analytics/activity — record user activity (upsert UserDailyActivity)
+// ─────────────────────────────────────────────────
+// POST /api/analytics/activity — record user activity
+// ─────────────────────────────────────────────────
+
 const recordActivity = async (req, res, next) => {
   try {
     const userId = req.user.sub;
-    const { postCount, likeCount, commentCount, shareCount, loginCount } = req.body;
+    const { type } = req.body;
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const validTypes = ['post', 'like', 'comment', 'share'];
+    if (!type || !validTypes.includes(type)) {
+      return error(res, `type must be one of: ${validTypes.join(', ')}`, 400);
+    }
+
+    const today = todayDate();
+
+    // Build the increment field
+    const incrementField = `${type}Count`;
 
     const activity = await prisma.userDailyActivity.upsert({
       where: { userId_date: { userId, date: today } },
       update: {
-        postCount: postCount !== undefined ? { increment: postCount } : undefined,
-        likeCount: likeCount !== undefined ? { increment: likeCount } : undefined,
-        commentCount: commentCount !== undefined ? { increment: commentCount } : undefined,
-        shareCount: shareCount !== undefined ? { increment: shareCount } : undefined,
-        loginCount: loginCount !== undefined ? { increment: loginCount } : undefined,
+        [incrementField]: { increment: 1 },
       },
       create: {
         userId,
         date: today,
-        postCount: postCount || 0,
-        likeCount: likeCount || 0,
-        commentCount: commentCount || 0,
-        shareCount: shareCount || 0,
-        loginCount: loginCount || 0,
+        postCount: type === 'post' ? 1 : 0,
+        likeCount: type === 'like' ? 1 : 0,
+        commentCount: type === 'comment' ? 1 : 0,
+        shareCount: type === 'share' ? 1 : 0,
+        loginCount: 0,
       },
     });
 
+    // Update user lastActiveAt (fire-and-forget)
+    prisma.user
+      .update({ where: { id: userId }, data: { lastActiveAt: new Date() } })
+      .catch(() => {});
+
     return success(res, activity);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─────────────────────────────────────────────────
+// POST /api/analytics/daily/calculate — admin/cron: compute DailyHistory
+// ─────────────────────────────────────────────────
+
+const calculateDailyHistory = async (req, res, next) => {
+  try {
+    const { date } = req.body;
+
+    // Default to yesterday if no date provided
+    const targetDate = date ? new Date(date) : (() => {
+      const d = new Date();
+      d.setDate(d.getDate() - 1);
+      return d;
+    })();
+
+    const { start, end } = dayBounds(targetDate);
+    const dateOnly = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+
+    // Run all aggregation queries in parallel
+    const [
+      newUsers,
+      totalPosts,
+      totalComments,
+      totalLikes,
+      activeUserRows,
+      totalShares,
+      totalViews,
+      totalUsers,
+    ] = await Promise.all([
+      // New users who signed up on that date
+      prisma.user.count({
+        where: { signupDate: { gte: start, lte: end } },
+      }),
+      // Posts created on that date
+      prisma.post.count({
+        where: { postDate: { gte: start, lte: end }, isDeleted: false },
+      }),
+      // Comments created on that date
+      prisma.postComment.count({
+        where: { commentDate: { gte: start, lte: end }, isDeleted: false },
+      }),
+      // Likes on that date
+      prisma.like.count({
+        where: { likeDate: { gte: start, lte: end } },
+      }),
+      // Active users (distinct logins on that date)
+      prisma.userLoginInfo.findMany({
+        where: { createdAt: { gte: start, lte: end } },
+        select: { userId: true },
+        distinct: ['userId'],
+      }),
+      // Shares — approximate from post totalShares that changed
+      // We use UserDailyActivity shareCount sum as a proxy
+      prisma.userDailyActivity.aggregate({
+        where: { date: dateOnly },
+        _sum: { shareCount: true },
+      }),
+      // Post views on that date
+      prisma.postView.count({
+        where: { viewedAt: { gte: start, lte: end } },
+      }),
+      // Total registered users as of that date
+      prisma.user.count({
+        where: { createdAt: { lte: end }, deletedAt: null },
+      }),
+    ]);
+
+    const activeUsers = activeUserRows.length;
+    const sharesSum = totalShares._sum.shareCount || 0;
+
+    // Upsert the DailyHistory record
+    const record = await prisma.dailyHistory.upsert({
+      where: { date: dateOnly },
+      update: {
+        newUsers,
+        totalPosts,
+        totalComments,
+        totalLikes,
+        activeUsers,
+        totalShares: sharesSum,
+        totalViews,
+        totalUsers,
+      },
+      create: {
+        date: dateOnly,
+        newUsers,
+        totalPosts,
+        totalComments,
+        totalLikes,
+        activeUsers,
+        totalShares: sharesSum,
+        totalViews,
+        totalUsers,
+      },
+    });
+
+    return success(res, record, 201);
   } catch (err) {
     next(err);
   }
@@ -190,4 +369,5 @@ module.exports = {
   getRetention,
   recordLogin,
   recordActivity,
+  calculateDailyHistory,
 };

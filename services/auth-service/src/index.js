@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3001;
 app.use(helmet());
 app.use(cors());
 app.use(morgan('dev'));
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 app.use(passport.initialize());
 
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'auth-service' }));

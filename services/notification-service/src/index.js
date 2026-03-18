@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3012;
 app.use(helmet());
 app.use(cors());
 app.use(morgan('dev'));
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'notification-service' }));
 

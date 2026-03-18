@@ -12,9 +12,9 @@ const PORT = process.env.PORT || 3013;
 app.use(helmet());
 app.use(cors());
 app.use(morgan('dev'));
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 
-app.get('/health', (req, res) => res.json({ status: 'ok', service: 'media-service' }));
+app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'media-service' }));
 
 app.use('/api/media', mediaRoutes);
 

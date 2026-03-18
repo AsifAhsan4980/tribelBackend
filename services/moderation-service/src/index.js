@@ -14,7 +14,7 @@ app.use(cors());
 app.use(morgan('dev'));
 app.use(express.json());
 
-app.get('/health', (req, res) => res.json({ status: 'ok', service: 'moderation-service' }));
+app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'moderation-service' }));
 
 app.use('/api/moderation', moderationRoutes);
 
